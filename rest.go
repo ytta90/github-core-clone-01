@@ -57,28 +57,108 @@ func (srv *server) dispatch(w http.ResponseWriter, r *http.Request) {
 // REST helpers
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// REST response shapes (structs, not maps: the hot paths marshal these
+// thousands of times per trial and struct encoding allocates far less).
+// ---------------------------------------------------------------------------
+
+type ownerResponse struct {
+	Login string `json:"login"`
+	ID    int    `json:"id"`
+	Type  string `json:"type,omitempty"`
+}
+
+type repoResponse struct {
+	ID            int           `json:"id"`
+	Name          string        `json:"name"`
+	FullName      string        `json:"full_name"`
+	Owner         ownerResponse `json:"owner"`
+	Private       bool          `json:"private"`
+	Description   string        `json:"description"`
+	DefaultBranch string        `json:"default_branch"`
+	HTMLURL       string        `json:"html_url"`
+	URL           string        `json:"url"`
+	CreatedAt     string        `json:"created_at"`
+	UpdatedAt     string        `json:"updated_at"`
+	PushedAt      string        `json:"pushed_at"`
+	HasIssues     bool          `json:"has_issues"`
+	HasProjects   bool          `json:"has_projects"`
+	HasWiki       bool          `json:"has_wiki"`
+	Fork          bool          `json:"fork"`
+	Archived      bool          `json:"archived"`
+	Disabled      bool          `json:"disabled"`
+	Visibility    string        `json:"visibility"`
+}
+
+type labelResponse struct {
+	ID    int    `json:"id"`
+	Name  string `json:"name"`
+	Color string `json:"color"`
+}
+
+type issueResponse struct {
+	ID        int             `json:"id"`
+	Number    int             `json:"number"`
+	Title     string          `json:"title"`
+	Body      string          `json:"body"`
+	State     string          `json:"state"`
+	Labels    []labelResponse `json:"labels"`
+	User      ownerResponse   `json:"user"`
+	CreatedAt string          `json:"created_at"`
+	UpdatedAt string          `json:"updated_at"`
+	ClosedAt  any             `json:"closed_at"`
+	Comments  int             `json:"comments"`
+	HTMLURL   string          `json:"html_url"`
+}
+
+type pullRefResponse struct {
+	Ref   string        `json:"ref"`
+	SHA   string        `json:"sha"`
+	Label string        `json:"label"`
+	User  ownerResponse `json:"user"`
+	Repo  struct {
+		Name string `json:"name"`
+	} `json:"repo"`
+}
+
+type pullResponse struct {
+	ID             int             `json:"id"`
+	Number         int             `json:"number"`
+	Title          string          `json:"title"`
+	Body           string          `json:"body"`
+	State          string          `json:"state"`
+	Head           pullRefResponse `json:"head"`
+	Base           pullRefResponse `json:"base"`
+	Merged         bool            `json:"merged"`
+	MergedAt       any             `json:"merged_at"`
+	MergeCommitSHA any             `json:"merge_commit_sha"`
+	Mergeable      bool            `json:"mergeable"`
+	User           ownerResponse   `json:"user"`
+	CreatedAt      string          `json:"created_at"`
+	UpdatedAt      string          `json:"updated_at"`
+	ClosedAt       any             `json:"closed_at"`
+	HTMLURL        string          `json:"html_url"`
+}
+
 // repoJSON renders the public repository object.
-func repoJSON(repo *Repo) map[string]any {
-	return map[string]any{
-		"id":             repo.ID,
-		"name":           repo.Name,
-		"full_name":      repo.Owner + "/" + repo.Name,
-		"owner":          map[string]any{"login": repo.Owner, "id": viewerID, "type": "User"},
-		"private":        repo.Private,
-		"description":    repo.Description,
-		"default_branch": repo.DefaultBranch,
-		"html_url":       "https://example.invalid/" + repo.Owner + "/" + repo.Name,
-		"url":            "/api/v3/repos/" + repo.Owner + "/" + repo.Name,
-		"created_at":     fixedTimestamp,
-		"updated_at":     fixedTimestamp,
-		"pushed_at":      fixedTimestamp,
-		"has_issues":     true,
-		"has_projects":   true,
-		"has_wiki":       true,
-		"fork":           false,
-		"archived":       false,
-		"disabled":       false,
-		"visibility":     visibilityOf(repo.Private),
+func repoJSON(repo *Repo) repoResponse {
+	return repoResponse{
+		ID:            repo.ID,
+		Name:          repo.Name,
+		FullName:      repo.Owner + "/" + repo.Name,
+		Owner:         ownerResponse{Login: repo.Owner, ID: viewerID, Type: "User"},
+		Private:       repo.Private,
+		Description:   repo.Description,
+		DefaultBranch: repo.DefaultBranch,
+		HTMLURL:       "https://example.invalid/" + repo.Owner + "/" + repo.Name,
+		URL:           "/api/v3/repos/" + repo.Owner + "/" + repo.Name,
+		CreatedAt:     fixedTimestamp,
+		UpdatedAt:     fixedTimestamp,
+		PushedAt:      fixedTimestamp,
+		HasIssues:     true,
+		HasProjects:   true,
+		HasWiki:       true,
+		Visibility:    visibilityOf(repo.Private),
 	}
 }
 
@@ -89,60 +169,59 @@ func visibilityOf(private bool) string {
 	return "public"
 }
 
-func issueJSON(repo *Repo, issue *Issue) map[string]any {
-	labels := make([]any, 0, len(issue.Labels))
+func issueJSON(repo *Repo, issue *Issue) issueResponse {
+	labels := make([]labelResponse, 0, len(issue.Labels))
 	for _, name := range issue.Labels {
 		color := "ededed"
 		if l, ok := repo.Labels[name]; ok && l.Color != "" {
 			color = l.Color
 		}
-		labels = append(labels, map[string]any{"id": 1, "name": name, "color": color})
+		labels = append(labels, labelResponse{ID: 1, Name: name, Color: color})
 	}
-	return map[string]any{
-		"id":         issue.ID,
-		"number":     issue.Number,
-		"title":      issue.Title,
-		"body":       issue.Body,
-		"state":      issue.State,
-		"labels":     labels,
-		"user":       map[string]any{"login": viewerLogin, "id": viewerID},
-		"created_at": fixedTimestamp,
-		"updated_at": fixedTimestamp,
-		"closed_at":  nil,
-		"comments":   len(repo.Comments[issue.Number]),
-		"html_url":   "https://example.invalid/" + repo.Owner + "/" + repo.Name + "/issues/" + strconv.Itoa(issue.Number),
+	return issueResponse{
+		ID:        issue.ID,
+		Number:    issue.Number,
+		Title:     issue.Title,
+		Body:      issue.Body,
+		State:     issue.State,
+		Labels:    labels,
+		User:      ownerResponse{Login: viewerLogin, ID: viewerID},
+		CreatedAt: fixedTimestamp,
+		UpdatedAt: fixedTimestamp,
+		ClosedAt:  nil,
+		Comments:  len(repo.Comments[issue.Number]),
+		HTMLURL:   "https://example.invalid/" + repo.Owner + "/" + repo.Name + "/issues/" + strconv.Itoa(issue.Number),
 	}
 }
 
-func pullJSON(repo *Repo, pr *Pull) map[string]any {
-	return map[string]any{
-		"id":     pr.ID,
-		"number": pr.Number,
-		"title":  pr.Title,
-		"body":   pr.Body,
-		"state":  pr.State,
-		"head": map[string]any{
-			"ref": pr.Head, "sha": pr.HeadSHA,
-			"label": repo.Owner + ":" + pr.Head,
-			"user":  map[string]any{"login": repo.Owner},
-			"repo":  map[string]any{"name": repo.Name},
-		},
-		"base": map[string]any{
-			"ref": pr.Base, "sha": pr.BaseSHA,
-			"label": repo.Owner + ":" + pr.Base,
-			"user":  map[string]any{"login": repo.Owner},
-			"repo":  map[string]any{"name": repo.Name},
-		},
-		"merged":          pr.Merged,
-		"merged_at":       nullableString(pr.Merged, pr.MergedAt),
-		"merge_commit_sha": nullableString(pr.Merged, pr.MergeSHA),
-		"mergeable":       true,
-		"user":            map[string]any{"login": viewerLogin, "id": viewerID},
-		"created_at":      fixedTimestamp,
-		"updated_at":      fixedTimestamp,
-		"closed_at":       nullableString(pr.State == "closed", fixedTimestamp),
-		"html_url":        "https://example.invalid/" + repo.Owner + "/" + repo.Name + "/pull/" + strconv.Itoa(pr.Number),
+func pullJSON(repo *Repo, pr *Pull) pullResponse {
+	head := pullRefResponse{Ref: pr.Head, SHA: pr.HeadSHA, Label: repo.Owner + ":" + pr.Head, User: ownerResponse{Login: repo.Owner}}
+	head.Repo.Name = repo.Name
+	base := pullRefResponse{Ref: pr.Base, SHA: pr.BaseSHA, Label: repo.Owner + ":" + pr.Base, User: ownerResponse{Login: repo.Owner}}
+	base.Repo.Name = repo.Name
+	out := pullResponse{
+		ID:        pr.ID,
+		Number:    pr.Number,
+		Title:     pr.Title,
+		Body:      pr.Body,
+		State:     pr.State,
+		Head:      head,
+		Base:      base,
+		Merged:    pr.Merged,
+		Mergeable: true,
+		User:      ownerResponse{Login: viewerLogin, ID: viewerID},
+		CreatedAt: fixedTimestamp,
+		UpdatedAt: fixedTimestamp,
+		HTMLURL:   "https://example.invalid/" + repo.Owner + "/" + repo.Name + "/pull/" + strconv.Itoa(pr.Number),
 	}
+	if pr.Merged {
+		out.MergedAt = pr.MergedAt
+		out.MergeCommitSHA = pr.MergeSHA
+	}
+	if pr.State == "closed" {
+		out.ClosedAt = fixedTimestamp
+	}
+	return out
 }
 
 func nullableString(ok bool, v string) any {
