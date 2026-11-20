@@ -514,6 +514,92 @@ func packChecksumOK(pack []byte) bool {
 // Reachability
 // ---------------------------------------------------------------------------
 
+// tagTarget returns the object an annotated tag points at.
+func (s *Store) tagTarget(tagOID string) (string, bool) {
+	obj := s.objects[tagOID]
+	if obj == nil || obj.Type != "tag" {
+		return "", false
+	}
+	for _, line := range strings.Split(string(obj.Data), "\n") {
+		if strings.HasPrefix(line, "object ") {
+			target := strings.TrimSpace(line[7:])
+			if isObjectID(target) {
+				return target, true
+			}
+		}
+		if line == "" {
+			break
+		}
+	}
+	return "", false
+}
+
+// collectReachableBounded is collectReachable with a stop set: the walk
+// includes a stop commit and its tree but never its parents (a shallow
+// boundary's ancestors are not held by the client).
+func (s *Store) collectReachableBounded(tips []string, stopAt map[string]bool) map[string]bool {
+	seen := make(map[string]bool)
+	var walkTree func(oid string)
+	var walkCommit func(oid string)
+	walkTree = func(oid string) {
+		if seen[oid] {
+			return
+		}
+		obj := s.objects[oid]
+		if obj == nil || obj.Type != "tree" {
+			return
+		}
+		seen[oid] = true
+		for _, e := range parseTree(obj.Data) {
+			if e.Mode == "40000" {
+				walkTree(e.OID)
+			} else {
+				seen[e.OID] = true
+			}
+		}
+	}
+	walkCommit = func(oid string) {
+		if seen[oid] {
+			return
+		}
+		obj := s.objects[oid]
+		if obj == nil {
+			return
+		}
+		if obj.Type == "tag" {
+			seen[oid] = true
+			if target, ok := s.tagTarget(oid); ok {
+				if t := s.objects[target]; t != nil {
+					if t.Type == "commit" {
+						walkCommit(target)
+					} else if t.Type == "tree" {
+						walkTree(target)
+					} else {
+						seen[target] = true
+					}
+				}
+			}
+			return
+		}
+		if obj.Type != "commit" {
+			return
+		}
+		seen[oid] = true
+		c := parseCommit(obj.Data)
+		walkTree(c.Tree)
+		if stopAt[oid] {
+			return
+		}
+		for _, p := range c.Parents {
+			walkCommit(p)
+		}
+	}
+	for _, tip := range tips {
+		walkCommit(tip)
+	}
+	return seen
+}
+
 // collectReachable returns every object reachable from tips (commits walk
 // parents + trees; trees recurse; tags dereference). Missing objects are
 // skipped when allowMissing is set.

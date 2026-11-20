@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -218,17 +219,10 @@ func (srv *server) readJSONBody(w http.ResponseWriter, r *http.Request, dst any)
 		return true
 	}
 	defer r.Body.Close()
-	var raw []byte
-	buf := make([]byte, 1<<20)
-	for {
-		n, err := r.Body.Read(buf)
-		raw = append(raw, buf[:n]...)
-		if err != nil {
-			break
-		}
-		if len(raw) > 1<<20 {
-			break
-		}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, (1<<20)+1))
+	if err != nil {
+		srv.writeErr(w, r, http.StatusBadRequest, "could not read request body")
+		return false
 	}
 	if len(bytesTrimSpace(raw)) == 0 {
 		return true

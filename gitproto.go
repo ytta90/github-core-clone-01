@@ -13,10 +13,16 @@ import (
 // Smart HTTP: info/refs, upload-pack, receive-pack
 // ---------------------------------------------------------------------------
 
-// gitRoutes handles /{owner}/{repo}.git/* paths.
+// gitRoutes handles /{owner}/{repo}.git/* paths. Reads share the store;
+// receive-pack mutates it.
 func (srv *server) handleGit(w http.ResponseWriter, r *http.Request, owner, repo, rest string) {
-	srv.store.mu.Lock()
-	defer srv.store.mu.Unlock()
+	if rest == "/git-receive-pack" {
+		srv.store.mu.Lock()
+		defer srv.store.mu.Unlock()
+	} else {
+		srv.store.mu.RLock()
+		defer srv.store.mu.RUnlock()
+	}
 	rep := srv.store.getRepo(owner, repo)
 	switch rest {
 	case "/info/refs":
@@ -69,7 +75,7 @@ func (srv *server) gitInfoRefs(w http.ResponseWriter, r *http.Request, repo *Rep
 	var buf bytes.Buffer
 	buf.Write(encodePktLine([]byte("# service=" + service + "\n")))
 	buf.Write(pktFlushBytes)
-	caps := "report-status-v2 report-status side-band-64k ofs-delta agent=forge/1.0.0"
+	caps := "report-status-v2 report-status side-band-64k ofs-delta delete-refs agent=forge/1.0.0"
 	refs := sortedRefs(repo)
 	if len(refs) == 0 {
 		// Empty repo: the capabilities^{} pseudo-ref.
@@ -81,7 +87,12 @@ func (srv *server) gitInfoRefs(w http.ResponseWriter, r *http.Request, repo *Rep
 		}
 		buf.Write(encodePktLine([]byte(head + " HEAD\x00" + caps + " symref=HEAD:refs/heads/" + repo.DefaultBranch + "\n")))
 		for _, ref := range refs {
-			buf.Write(encodePktLine([]byte(repo.Refs[ref] + " " + ref + "\n")))
+			oid := repo.Refs[ref]
+			buf.Write(encodePktLine([]byte(oid + " " + ref + "\n")))
+			// Annotated tags peel to their target commit.
+			if target, ok := srv.store.tagTarget(oid); ok {
+				buf.Write(encodePktLine([]byte(target + " " + ref + "^{}\n")))
+			}
 		}
 	}
 	buf.Write(pktFlushBytes)
@@ -187,7 +198,12 @@ func (srv *server) v2LsRefs(w http.ResponseWriter, r *http.Request, repo *Repo, 
 		if !keep(ref) {
 			continue
 		}
-		buf.Write(encodePktLine([]byte(repo.Refs[ref] + " " + ref + "\n")))
+		oid := repo.Refs[ref]
+		line := oid + " " + ref
+		if target, ok := srv.store.tagTarget(oid); ok {
+			line += " peeled:" + target
+		}
+		buf.Write(encodePktLine([]byte(line + "\n")))
 	}
 	buf.Write(pktFlushBytes)
 	srv.writeGitResult(w, r, "application/x-git-upload-pack-result", buf.Bytes())
@@ -301,16 +317,28 @@ func splitSideband(pack []byte) [][]byte {
 // It returns (pack, shallow, unshallow, acks, nak).
 func (srv *server) buildFetchPack(repo *Repo, wants, haves, shallow []string, depth int, deepenSince int64, filter string) ([]byte, []string, []string, []string, bool) {
 	store := srv.store
-	// Deduplicate wants; drop unknown ones.
+	// Deduplicate wants; drop unknown ones. A want may be a commit or an
+	// annotated tag (whose target commit is what the history walk uses).
 	seenWant := map[string]bool{}
 	var cleanWants []string
+	var tagWants []string
 	for _, w := range wants {
 		if !isObjectID(w) || seenWant[w] {
 			continue
 		}
 		seenWant[w] = true
-		if obj := store.objects[w]; obj != nil && obj.Type == "commit" {
+		obj := store.objects[w]
+		if obj == nil {
+			continue
+		}
+		switch obj.Type {
+		case "commit":
 			cleanWants = append(cleanWants, w)
+		case "tag":
+			tagWants = append(tagWants, w)
+			if target, ok := store.tagTarget(w); ok {
+				cleanWants = append(cleanWants, target)
+			}
 		}
 	}
 	// ACK negotiation.
@@ -399,8 +427,15 @@ func (srv *server) buildFetchPack(repo *Repo, wants, haves, shallow []string, de
 	} else {
 		included, _ = store.commitLevels(cleanWants, 0)
 	}
-	// Objects to send: reachable from included commits, minus haves' closure.
-	haveSet := store.collectReachable(haves, true)
+	// Objects to send: reachable from included commits, minus what the client
+	// holds. When the client restates a shallow boundary, the boundary's
+	// ancestors are NOT held: the exclusion walk stops at the boundary
+	// (a deepen must deliver the next generation).
+	stopAt := map[string]bool{}
+	for _, s := range shallow {
+		stopAt[s] = true
+	}
+	haveSet := store.collectReachableBounded(haves, stopAt)
 	var objs []*Object
 	seenObj := map[string]bool{}
 	var addTree func(oid string)
@@ -451,6 +486,16 @@ func (srv *server) buildFetchPack(repo *Repo, wants, haves, shallow []string, de
 	}
 	for oid := range included {
 		addCommit(oid)
+	}
+	// Wanted tag objects themselves (their targets are already included).
+	for _, tagOID := range tagWants {
+		if seenObj[tagOID] || haveSet[tagOID] {
+			continue
+		}
+		seenObj[tagOID] = true
+		if obj := store.objects[tagOID]; obj != nil {
+			objs = append(objs, obj)
+		}
 	}
 	// filter blob:none drops blobs.
 	if filter == "blob:none" {
