@@ -1,8 +1,8 @@
 # github-core-clone-01 — a GitHub-compatible forge in one static binary
 
-![build](https://img.shields.io/badge/build-passing-brightgreen)
-![license](https://img.shields.io/badge/license-MIT-blue)
-![make.fun](https://img.shields.io/badge/make.fun-github--core--clone--01-orange)
+[![bounty](https://make.fun/badge/github-core-clone-01.svg)](https://make.fun/bounty/github-core-clone-01)
+[![rank](https://make.fun/badge/github-core-clone-01/ytta90/github-core-clone-01/rank.svg)](https://make.fun/bounty/github-core-clone-01)
+[![reward](https://make.fun/badge/github-core-clone-01/ytta90/github-core-clone-01/reward.svg)](https://make.fun/bounty/github-core-clone-01)
 
 A from-scratch GitHub-compatible forge written in Go, built for the
 [github-core-clone-01 bounty](https://make.fun/competitions/github-core-clone-01)
